@@ -1,6 +1,7 @@
 from pydantic import BaseModel, TypeAdapter, ValidationError
 import json
-from llm_sdk.model import Small_LLM_Model
+from pathlib import Path
+#from llm_sdk.model import Small_LLM_Model #depois vejo
 
 class Typeinfo (BaseModel):
     type: str
@@ -14,7 +15,16 @@ class Function(BaseModel):
 class PromptTest(BaseModel):
     prompt: str
 
-caminho2 = '/Users/liza/Documents/for transfer - documents/Promised Files/tester/call_me_maybe/datas/function_calling_tests.json'
+
+def load_func(caminho_do_json: str | Path) -> list[Function]:
+    path = '/Users/liza/Documents/for transfer - documents/Promised Files/tester/call_me_maybe/datas/functions_definition.json'
+    with open(path, 'r', encoding='utf-8') as arch:
+        lists = json.load(arch)
+    return TypeAdapter(list[Function]).validate_python(lists)
+
+# u.u
+    
+"""caminho2 = '/Users/liza/Documents/for transfer - documents/Promised Files/tester/call_me_maybe/datas/function_calling_tests.json'
 with open(caminho2, "r", encoding="utf-8") as f:
     tests = json.load(f)
 for test in tests:
@@ -30,4 +40,4 @@ lista_validada = TypeAdapter(list[Function]).validate_python(lista_de_dicionario
 print(type(lista_validada))
 print(type(lista_validada[0]))
 print(lista_validada[0].name)
-print(lista_validada[0].parameters['a'].type)
+print(lista_validada[0].parameters['a'].type)"""
