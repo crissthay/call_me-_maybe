@@ -1,41 +1,35 @@
-NAME    = olha vejo depois
-VENV    = venv
-PYTHON  = $(VENV)/bin/python
-PIP     = $(VENV)/bin/pip
+UV         := $(HOME)/.local/bin/uv
+SGOINFRE   := $(shell [ -d /sgoinfre/$(USER) ] && echo /sgoinfre/$(USER) || echo $(HOME))
+VENV_DIR   := $(SGOINFRE)/.venv_cmm
 
-.SILENT:
+UV_ENV     := UV_CACHE_DIR=$(SGOINFRE)/.cache/uv \
+              UV_PROJECT_ENVIRONMENT=$(VENV_DIR) \
+              HF_HOME=$(SGOINFRE)/.cache/huggingface
 
-all: install
+UV_RUN     := $(UV_ENV) $(UV) run
 
-$(VENV):
-	python3 -m venv $(VENV)
+.PHONY: install run debug clean lint lint-strict
 
-install: $(VENV)
-	$(PIP) install --upgrade pip
-	$(PIP) install -r requirements.txt
+install:
+	mkdir -p $(SGOINFRE)/.cache/uv $(SGOINFRE)/.cache/huggingface $(VENV_DIR)
+	$(UV_ENV) $(UV) sync
 
-build: install
-	$(PYTHON) -m build --wheel --outdir .
+run:
+	$(UV_RUN) python -m src
 
-run: install
-	$(PYTHON) $(NAME) $(CONFIG)
+debug:
+	$(UV_RUN) python -m pdb -m src
 
-debug: install
-	$(PYTHON) -m pdb $(NAME) $(CONFIG)
+lint:
+	$(UV_RUN) flake8 .
+	$(UV_RUN) mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
 
-lint: install
-	$(VENV)/bin/flake8 . --exclude venv
-	$(VENV)/bin/mypy . --warn-return-any \
-		--warn-unused-ignores \
-		--ignore-missing-imports \
-		--disallow-untyped-defs \
-		--check-untyped-defs
+lint-strict:
+	$(UV_RUN) flake8 .
+	$(UV_RUN) mypy . --strict
 
 clean:
-	rm -rf venv build dist *.egg-info
-	find . -type d -name '__pycache__' -exec rm -rf {} +
-	find . -type d -name '.mypy_cache' -exec rm -rf {} +
-	find . -type d -name '.pytest_cache' -exec rm -rf {} +
-	rm -rf venv
-
-.PHONY: all install build run debug lint lint-strict clean
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+	find . -type d -name ".mypy_cache" -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+	rm -rf data/output/*
