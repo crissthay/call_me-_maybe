@@ -1,6 +1,7 @@
 import os
 from .input_loader import read_json_func, read_json_prompt, promptformer
 from llm_sdk.llm_sdk.__init__ import Small_LLM_Model
+import torch
 
 
 if __name__ == "__main__":
@@ -30,4 +31,16 @@ if __name__ == "__main__":
     print("\n === TEST encode ====")
     model = Small_LLM_Model()
     res = promptformer(model, func1)
-    print(res)
+    
+    if res is not None:
+        print("\n=== RESULTADOS DA PREVISÃO DO MODELO ===\n")
+        for i, logits_da_frase in enumerate(res):
+            logits_tensor = torch.tensor(logits_da_frase)
+            next_token_id = torch.argmax(logits_tensor).item()
+            palavra_prevista = model.decode([next_token_id])
+            
+            print(f"Prompt {i+1}: '{func1[i].prompt if hasattr(func1[i], 'prompt') else func1[i]}'")
+            print(f"➡️ Próxima palavra prevista: '{palavra_prevista}'\n")
+
+    path = model.get_path_to_vocab_file()
+    print("\nPATH: ", path)

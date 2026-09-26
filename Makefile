@@ -1,6 +1,6 @@
 UV         := $(HOME)/.local/bin/uv
 SGOINFRE   := $(shell [ -d /sgoinfre/$(USER) ] && echo /sgoinfre/$(USER) || echo $(HOME))
-VENV_DIR   := $(SGOINFRE)/.venv_cmm
+VENV_DIR   := $(SGOINFRE)/venv
 
 UV_ENV     := UV_CACHE_DIR=$(SGOINFRE)/.cache/uv \
               UV_PROJECT_ENVIRONMENT=$(VENV_DIR) \
@@ -32,4 +32,6 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
+	rm -rf .venv
+
 	rm -rf data/output/*
