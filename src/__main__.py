@@ -35,6 +35,9 @@ if __name__ == "__main__":
     if res is not None:
         print("\n=== RESULTADOS DA PREVISÃO DO MODELO ===\n")
         for i, logits_da_frase in enumerate(res):
+            print(type(logits_da_frase))
+            print(type(logits_da_frase[0]))
+            print(logits_da_frase[0])
             logits_tensor = torch.tensor(logits_da_frase)
             next_token_id = torch.argmax(logits_tensor).item()
             palavra_prevista = model.decode([next_token_id])
@@ -42,6 +45,7 @@ if __name__ == "__main__":
             print(f"Prompt {i+1}: '{pro[i].prompt if hasattr(pro[i], 'prompt') else pro[i]}'")
             print(f" Próxima palavra prevista: '{palavra_prevista}'\n")
 
+    
     path = model.get_path_to_vocab_file()
     print("\nPATH: ", path)
 
