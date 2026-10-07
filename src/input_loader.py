@@ -105,12 +105,12 @@ def select_function(
     context_ids: list[int],
     function_token_sequences: list[list[int]],
 ) -> int:
-    """Escole qual função bate com o contexto.., deiando limitade
+    """Escole qual função bate com o context.., deiando limitade
     candidatas token por token :) constrained decoding).
 
     Args:
         model: a instância de Small_LLM_Model #LEMBRA DE TRADUZIR
-        context_ids: tokens do contexto (ex: input_ids_list que
+        context_ids: tokens do context (ex: input_ids_list que
             funcformer já calcula pra cada prompt)
         function_token_sequences: pra cada função, a lista de
             token ids do nome dela (é o function_tokens que
@@ -148,3 +148,42 @@ def select_function(
         position += 1
 
     return candidates[0]
+
+
+def gen_number(model, vocab_map, context_id, max_tokens=10):
+    """vocab_map: dict token_id - text do token (você monta isso
+    uma vez, lendo o arquivo de get_path_to_vocab_file())."""
+    gen = []
+
+    for _ in range(max_tokens):
+        logits = model.get_logits_from_input_ids(context_id + gen)
+
+        val = [
+            tid for tid, text in vocab_map.items()
+            if text.strip().replace(".", "", 1).replace("-", "", 1).isdigit()
+            or text.strip() in (",", "}")
+        ]
+
+        chosee = max(val, key=lambda t: logits[t])
+        text_chosee = vocab_map[chosee]
+
+        if text_chosee.strip() in (",", "}"):
+            break #normlaizar o desistir 
+
+        gen.append(chosee)
+
+    return gen
+
+
+def chose_bool(model, context_id, token_true, token_false):
+    """token_true/token_false: listas de token ids de true/false
+    geradas com model.encode('true') eeg model.encode(false)"""
+
+    logits = model.get_logits_from_input_ids(context_id)
+
+    first_true = token_true[0]
+    last_true = token_false[0]
+
+    if logits[first_true] >= logits[last_true]:
+        return token_true
+    return token_false
