@@ -4,7 +4,7 @@ VENV_DIR   := $(SGOINFRE)/venv
 
 UV_ENV     := UV_CACHE_DIR=$(SGOINFRE)/.cache/uv \
               UV_PROJECT_ENVIRONMENT=$(VENV_DIR) \
-              HF_HOME=$(SGOINFRE)/.cache/huggingface
+              HF_HeOME=$(SGOINFRE)/.cache/huggingface
 
 UV_RUN     := $(UV_ENV) $(UV) run
 
@@ -32,6 +32,6 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
-	rm -rf .venv
+	rm -rf venv
 
 	rm -rf data/output/*
