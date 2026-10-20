@@ -16,7 +16,7 @@ class PromptTest(BaseModel):
 class FunctionCallResult(BaseModel):
     prompt: str
     name: str
-    parameters: str
+    parameters: dict
 
 class TokenSets(BaseModel):
     """Token ids grouped by what they are allowed to be.

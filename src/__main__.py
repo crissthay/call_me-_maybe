@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 from pydantic import ValidationError
-from llm_sdk.llm_sdk import Small_LLM_Model  # type: ignore[attr-defined]
+from llm_sdk.llm_sdk import Small_LLM_Model  #type: ignore[attr-defined] documentacaooo
 from .classes import FunctionCallResult
 from .decoder import build_token_sets, load_vocab, resolve_prompt
 from .input_loader import read_json_func, read_json_prompt
