@@ -3,13 +3,6 @@ name = "llm-sdk"
 version = "0.1.0"
 description = "LLM SDK for local model inference"
 requires-python = ">=3.10"
-#dependencies = [
-#   "torch>=2.0.0",
-#   "transformers>=4.40.0",
-#   "huggingface-hub>=0.20.0",
-#   "pydantic",
-#   "accelerate>=1.15.0",
-#]
 dependencies = [
     "torch==2.6.0",
     "transformers==4.51.3",

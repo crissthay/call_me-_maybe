@@ -1,80 +1,41 @@
-"""Constrained decoding: force the LLM to only produce valid output.
+"""Constrained function-call decoding and argument extraction."""
 
-Idea in one sentence: at every step we ask the model for the logits
-(one score per token), look ONLY at the tokens that are allowed at
-that point, and pick the best-scored one. Ignoring the other tokens is
-the same as setting their logits to -infinity.
-"""
 import json
+import re
 from typing import Any
 
 import numpy as np
 
-from .classes import Function, FunctionCallResult, TokenSets
-
-NUMBER_CHARS = set("0123456789.-")
-MAX_NUMBER_TOKENS = 12
-MAX_STRING_TOKENS = 40
-FEW_SHOT = (
-    'Copy text values exactly as written in the request, keeping the '
-    'same capitalization. Regex patterns must be short and general. '
-    'A replacement is the text that replaces ONE match.\n\n'
-    "Request: Convert 'abc' to uppercase and repeat it 3 times\n"
-    'Arguments as JSON: {"text": "abc", "times": 3}\n\n'
-    "Request: Replace the word 'red' with 'blue' in 'red car'\n"
-    'Arguments as JSON: {"text": "red car", "pattern": "red", '
-    '"new": "blue"}\n\n'
-    "Request: Replace all digits in 'a1b22' with X\n"
-    'Arguments as JSON: {"text": "a1b22", "pattern": "\\\\d+", '
-    '"new": "X"}\n\n'
-    "Request: Replace all uppercase letters in 'aBcD' with dashes\n"
-    'Arguments as JSON: {"text": "aBcD", "pattern": "[A-Z]", '
-    '"new": "-"}\n\n'
-)
+from src.classes import Function, FunctionCallResult, TokenSets
 
 
-def load_vocab(path: str) -> dict[int, str]:
-    """Load the vocabulary file as {token_id: readable_text}.
-
-    The file maps token text -> id. Byte-level tokenizers write a space
-    as 'Ġ' and a newline as 'Ċ', so we translate them back.
-
-    Args:
-        path: result of model.get_path_to_vocab_file().
-
-    Returns:
-        Dict from token id to the text that token represents.
-    """
-    with open(path, 'r', encoding='utf-8') as file:
-        raw: dict[str, int] = json.load(file)
-    return {
-        tid: text.replace('Ġ', ' ').replace('Ċ', '\n')
-        for text, tid in raw.items()
-    }
+MAX_NUMBER_TOKENS = 16
 
 
-def build_token_sets(vocab: dict[int, str]) -> TokenSets:
-    """Classify every token once, so we do not redo it per prompt.
+def load_vocab(path: str) -> dict[str, int]:
+    """Load the model vocabulary from its JSON file."""
+    with open(path, encoding="utf-8") as file:
+        return json.load(file)
 
-    Args:
-        vocab: result of load_vocab.
 
-    Returns:
-        TokenSets with the ids allowed for numbers, strings, the tokens
-        that start with a quote (they close a string, e.g. '"' or
-        '",') and the tokens that signal "the number ended".
-    """
-    number_ids = [
-        i for i, t in vocab.items()
-        if t and all(c in NUMBER_CHARS for c in t)
-    ]
-    string_ids = [
-        i for i, t in vocab.items()
-        if t and t.isprintable() and '"' not in t
-        and not t.startswith('<|')
-    ]
-    quote_ids = [i for i, t in vocab.items() if t.startswith('"')]
-    stop_ids = [i for i, t in vocab.items() if t and t[0] in ',}']
+def build_token_sets(vocab: dict[str, int]) -> TokenSets:
+    """Build reusable groups of token IDs."""
+    number_ids: list[int] = []
+    string_ids: list[int] = []
+    quote_ids: list[int] = []
+    stop_ids: list[int] = []
+
+    for token, token_id in vocab.items():
+        clean = token.replace("Ġ", " ").replace("Ċ", "\n").replace("ċ", "\n")
+        if clean == '"':
+            quote_ids.append(token_id)
+        elif clean in (",", "}"):
+            stop_ids.append(token_id)
+        elif clean and all(char in "0123456789.-" for char in clean):
+            number_ids.append(token_id)
+        elif clean.isprintable() and '"' not in clean and not token.startswith("<|"):
+            string_ids.append(token_id)
+
     return TokenSets(
         number_ids=number_ids,
         string_ids=string_ids,
@@ -84,227 +45,237 @@ def build_token_sets(vocab: dict[int, str]) -> TokenSets:
 
 
 def encode_ids(model: Any, text: str) -> list[int]:
-    """Turn text into a flat list of token ids using the SDK."""
-    return list(model.encode(text)[0].tolist())
+    """Encode text with the tokenizer exposed by the model."""
+    return model.encode(text)[0].tolist()
 
 
-def best_allowed(logits: list[float], allowed: list[int]) -> int:
-    """Return the allowed token id with the highest logit.
-
-    Args:
-        logits: one score per token in the vocabulary.
-        allowed: the only ids we accept right now.
-
-    Returns:
-        The best id among `allowed`.
-    """
+def best_allowed(logits: list[float], allowed_ids: list[int]) -> int:
+    """Return the highest-logit token among permitted token IDs."""
+    if not allowed_ids:
+        raise ValueError("There are no permitted tokens.")
     scores = np.asarray(logits)
-    allowed_arr = np.asarray(allowed)
-    return int(allowed_arr[np.argmax(scores[allowed_arr])])
+    ids = np.asarray(allowed_ids, dtype=int)
+    return int(ids[np.argmax(scores[ids])])
 
 
 def select_sequence(
     model: Any,
-    context_ids: list[int],
-    sequences: list[list[int]],
-) -> int:
-    """Pick one of a fixed list of candidates, token by token.
-
-    Used for function names and for true/false. Each step keeps only
-    the candidates whose next token matches the token the model chose.
-
-    Args:
-        model: the Small_LLM_Model instance.
-        context_ids: tokens of the prompt so far.
-        sequences: token ids of each candidate.
-
-    Returns:
-        Index (in `sequences`) of the chosen candidate.
-    """
-    candidates = list(range(len(sequences)))
+    context: list[int],
+    candidates: list[list[int]],
+) -> list[int]:
+    """Select one complete candidate sequence using constrained decoding."""
+    remaining = [sequence for sequence in candidates if sequence]
     generated: list[int] = []
-    position = 0
 
-    while len(candidates) > 1:
-        expected = list({
-            sequences[i][position]
-            for i in candidates if position < len(sequences[i])
+    while remaining:
+        next_ids = list({
+            sequence[len(generated)]
+            for sequence in remaining
+            if len(sequence) > len(generated)
         })
-        if not expected:
+        if not next_ids:
             break
-        logits = model.get_logits_from_input_ids(context_ids + generated)
-        chosen = best_allowed(logits, expected)
-        generated.append(chosen)
-        candidates = [
-            i for i in candidates
-            if position < len(sequences[i])
-            and sequences[i][position] == chosen
+
+        logits = model.get_logits_from_input_ids(context + generated)
+        token = best_allowed(logits, next_ids)
+        generated.append(token)
+
+        remaining = [
+            sequence for sequence in remaining
+            if sequence[:len(generated)] == generated
         ]
-        finished = [i for i in candidates if len(sequences[i]) == position + 1]
-        if finished:
-            return finished[0]
-        position += 1
+        if generated in remaining:
+            return generated
 
-    return candidates[0]
-
-
-def _can_extend(current: str, piece: str) -> bool:
-    """Check that adding `piece` keeps `current` a valid number prefix."""
-    for char in piece:
-        if char == '-' and current != '':
-            return False
-        if char == '.' and ('.' in current or current in ('', '-')):
-            return False
-        current += char
-    return True
+    raise ValueError("The model could not select a permitted candidate.")
 
 
 def generate_number(
     model: Any,
-    vocab: dict[int, str],
-    sets: TokenSets,
-    context_ids: list[int],
-) -> tuple[float, list[int]]:
-    """Generate a JSON number token by token.
-
-    Only digit/dot/minus tokens are allowed (following number rules).
-    Once the number has at least one digit, the 'stop' tokens (',' or
-    '}') also become allowed: if the model picks one, the number ended.
-
-    Returns:
-        The number and the token ids that were generated.
-    """
+    context: list[int],
+    token_sets: TokenSets,
+    integer: bool = False,
+) -> tuple[int | float, list[int]]:
+    """Generate a numeric argument with restricted vocabulary tokens."""
     generated: list[int] = []
-    text = ''
 
     for _ in range(MAX_NUMBER_TOKENS):
-        logits = model.get_logits_from_input_ids(context_ids + generated)
-        allowed = [
-            i for i in sets.number_ids if _can_extend(text, vocab[i])
-        ]
-        if text and text[-1].isdigit():
-            allowed = allowed + sets.stop_ids
-        chosen = best_allowed(logits, allowed)
-        if chosen in sets.stop_ids:
+        logits = model.get_logits_from_input_ids(context + generated)
+        allowed = token_sets.number_ids.copy()
+        if generated:
+            allowed.extend(token_sets.stop_ids)
+
+        token = best_allowed(logits, allowed)
+        if token in token_sets.stop_ids:
             break
-        generated.append(chosen)
-        text += vocab[chosen]
+        generated.append(token)
+
+    text = model.decode(generated).strip()
+    if not text or text in ("-", "."):
+        raise ValueError("The model generated an invalid number.")
 
     try:
-        return float(text), generated
-    except ValueError:
-        return 0.0, generated
+        value = float(text)
+    except ValueError as exc:
+        raise ValueError(f"Invalid numeric value: {text!r}") from exc
+
+    if not np.isfinite(value):
+        raise ValueError("The generated number is not finite.")
+    if integer and not value.is_integer():
+        raise ValueError("An integer argument was expected.")
+    if value.is_integer():
+        return int(value), generated
+    return value, generated
 
 
-def _unescape(text: str) -> str:
-    """Turn doubled backslashes (JSON style) into single ones.
+def _quoted_values(prompt: str) -> list[str]:
+    """Return text enclosed in matching single or double quotes."""
+    matches = re.findall(r'"([^"]*)"|\'([^\']*)\'', prompt)
+    values = [double if double else single for double, single in matches]
+    return list(dict.fromkeys(values))
 
-    Any other backslash sequence is kept as written, because in a
-    regex it must stay a backslash followed by a letter.
-    """
-    return text.replace('\\\\', '\\')
+
+def _word_values(prompt: str) -> list[str]:
+    """Return distinct word-like values from the request."""
+    return list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]+", prompt)))
+
+
+def _string_candidates(prompt: str, parameter: str) -> list[str]:
+    """Build literal candidates; constrained decoding chooses between them."""
+    quoted = _quoted_values(prompt)
+    words = _word_values(prompt)
+
+    if parameter == "source_string":
+        candidates = quoted or words
+    elif parameter == "regex":
+        candidates = [r"\d+", "[aeiouAEIOU]", r"\w+", ".*"]
+        for word in words:
+            if len(word) > 1:
+                candidates.extend((re.escape(word), r"\b" + re.escape(word) + r"\b"))
+    elif parameter == "replacement":
+        candidates = quoted + words
+        if re.search(r"\basterisks?\b", prompt, flags=re.IGNORECASE):
+            candidates.append("*")
+    else:
+        candidates = quoted + words
+
+    return list(dict.fromkeys(value for value in candidates if value != ""))
 
 
 def generate_string(
     model: Any,
-    sets: TokenSets,
-    context_ids: list[int],
+    context: list[int],
+    prompt: str,
+    parameter: str,
+    token_sets: TokenSets,
 ) -> tuple[str, list[int]]:
-    """Generate the content of a JSON string (without the quotes).
+    """Select a string candidate instead of free-running generation."""
+    if not token_sets.quote_ids:
+        raise ValueError('The vocabulary has no standalone double-quote token.')
 
-    Any token without a quote/backslash is allowed. When the model
-    picks the closing quote, the string ends.
+    values = _string_candidates(prompt, parameter)
+    if not values:
+        raise ValueError(f"No candidate text found for parameter {parameter!r}.")
 
-    Returns:
-        The decoded text and the token ids that were generated.
-    """
-    generated: list[int] = []
-    allowed = sets.string_ids + sets.quote_ids
+    quote_ids = encode_ids(model, '"')
+    if not quote_ids:
+        raise ValueError("The tokenizer could not encode a closing quote.")
 
-    for _ in range(MAX_STRING_TOKENS):
-        logits = model.get_logits_from_input_ids(context_ids + generated)
-        chosen = best_allowed(logits, allowed)
-        if chosen in sets.quote_ids:
-            break
-        generated.append(chosen)
-        if len(generated) >= 6 and generated[-3:] == generated[-6:-3]:
-            del generated[-3:]
-            break
+    sequences = [encode_ids(model, value) + quote_ids for value in values]
+    selected = select_sequence(model, context, sequences)
 
-    return _unescape(str(model.decode(generated))), generated
+    for value, sequence in zip(values, sequences):
+        if selected == sequence:
+            return value, selected
+    raise ValueError("Selected string did not match a candidate.")
+
+
+def generate_boolean(model: Any, context: list[int]) -> tuple[bool, list[int]]:
+    """Select either true or false using constrained decoding."""
+    options = [encode_ids(model, "true"), encode_ids(model, "false")]
+    selected = select_sequence(model, context, options)
+    decoded = model.decode(selected).strip()
+    if decoded not in ("true", "false"):
+        raise ValueError("The model generated an invalid boolean.")
+    return decoded == "true", selected
 
 
 def build_context(functions: list[Function], prompt: str) -> str:
-    """Build the text that explains the task to the model."""
-    lines = ['Available functions:']
-    for func in functions:
-        params = ', '.join(
-            f'{n}: {t.type}' for n, t in func.parameters.items()
+    """Describe available functions and append the user's request."""
+    descriptions: list[str] = []
+    for function in functions:
+        parameters = ", ".join(
+            f"{name}: {details.type}"
+            for name, details in function.parameters.items()
         )
-        lines.append(f'- {func.name}({params}): {func.description}')
-    lines.append(f'\nUser request: {prompt}')
-    return '\n'.join(lines)
+        descriptions.append(
+            f"{function.name}({parameters}): {function.description}"
+        )
+
+    return (
+        "Choose the best function for the user's request.\n"
+        "Extract argument values only. Do not execute the function.\n"
+        + "\n".join(descriptions)
+        + f"\nUser request: {prompt}\n"
+        + "Select the function name:\n"
+    )
 
 
 def resolve_prompt(
     model: Any,
-    vocab: dict[int, str],
-    sets: TokenSets,
+    vocab: dict[str, int],
+    token_sets: TokenSets,
     functions: list[Function],
     prompt: str,
 ) -> FunctionCallResult:
-    """Turn one prompt into a function name plus its arguments.
+    """Choose a function and construct its typed arguments."""
+    del vocab  # The vocabulary is already represented by token_sets.
 
-    Step 1: choose the function (select_sequence over the names).
-    Step 2: for each parameter, write the fixed JSON parts ourselves
-    (key, colon, quotes) and let the model generate ONLY the value,
-    constrained by the parameter type.
+    context = encode_ids(model, build_context(functions, prompt))
+    function_sequences = [encode_ids(model, item.name) for item in functions]
+    selected_function = select_sequence(model, context, function_sequences)
+    function_name = model.decode(selected_function).strip()
 
-    Returns:
-        The validated result for this prompt.
-    """
-    context = build_context(functions, prompt)
-    base = encode_ids(model, context + '\nThe best function is:')
-
-    names = [encode_ids(model, ' ' + f.name) for f in functions]
-    function = functions[select_sequence(model, base, names)]
-
-    params = ', '.join(
-        f'{n}: {t.type}' for n, t in function.parameters.items()
+    function = next(
+        (item for item in functions if item.name == function_name),
+        None,
     )
-    ids = encode_ids(
-        model,
-        FEW_SHOT
-        + f'Request: {prompt}\n'
-        + f'Function: {function.name} - {function.description}\n'
-        + f'Parameters: {params}\n'
-        + 'Arguments as JSON: {',
-    )
-    values: dict[str, Any] = {}
-    last = len(function.parameters) - 1
+    if function is None:
+        raise ValueError(f"Unknown function selected: {function_name!r}")
 
-    for pos, (pname, ptype) in enumerate(function.parameters.items()):
-        kind = ptype.type
-        quote = '"' if kind == 'string' else ''
-        ids += encode_ids(model, f'"{pname}": {quote}')
+    context += selected_function
+    context += encode_ids(model, '\n{"')
+    arguments: dict[str, Any] = {}
 
-        if kind in ('number', 'integer'):
-            number, new = generate_number(model, vocab, sets, ids)
-            values[pname] = int(number) if kind == 'integer' else number
-        elif kind == 'string':
-            values[pname], new = generate_string(model, sets, ids)
-        elif kind == 'boolean':
-            options = [
-                encode_ids(model, 'true'), encode_ids(model, 'false')
-            ]
-            index = select_sequence(model, ids, options)
-            values[pname], new = (index == 0), options[index]
+    for index, (name, details) in enumerate(function.parameters.items()):
+        if index:
+            context += encode_ids(model, ',"')
+        context += encode_ids(model, name + '":')
+
+        if details.type == "string":
+            context += encode_ids(model, '"')
+            value, generated = generate_string(
+                model, context, prompt, name, token_sets
+            )
+        elif details.type in ("number", "integer"):
+            value, generated = generate_number(
+                model,
+                context,
+                token_sets,
+                integer=details.type == "integer",
+            )
+        elif details.type == "boolean":
+            value, generated = generate_boolean(model, context)
         else:
-            raise ValueError(f'Unsupported parameter type: {kind}')
+            raise ValueError(
+                f"Unsupported parameter type {details.type!r} for {name!r}."
+            )
 
-        ids += new
-        ids += encode_ids(model, f'{quote}' + (', ' if pos < last else '}'))
+        arguments[name] = value
+        context += generated
 
     return FunctionCallResult(
-        prompt=prompt, name=function.name, parameters=values
+        prompt=prompt,
+        name=function.name,
+        parameters=arguments,
     )
